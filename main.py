@@ -72,7 +72,7 @@ class TelegramBot:
         self.database_worker = DatabaseManager()
         self.newsparser_worker = NewsParser()
 
-        self.__updater_worker = Updater("731319505:AAEU1_KWlT_eXxL0BNGMvngwZhA7mkGT8Go", request_kwargs=REQUEST_KWARGS)
+        self.__updater_worker = Updater("", request_kwargs=REQUEST_KWARGS)
         self.__dispatcher = self.__updater_worker.dispatcher
 
         self.__dispatcher.add_handler(CommandHandler("add", self.__add_rss, pass_args=True))
