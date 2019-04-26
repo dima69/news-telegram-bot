@@ -1,2 +1,3 @@
 # news-telegram-bot
-another tg news bot
+Just another one Telegram news parser bot that will parse entries from RSS.
+Nothing fancy, pet project.
