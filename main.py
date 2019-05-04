@@ -1,12 +1,15 @@
+import configparser
+import logging
 import feedparser
 import psycopg2
-import logging
-import configparser
 from psycopg2 import extras
 from telegram.ext import Updater, CommandHandler
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+PROXY_TG = {'proxy_url': 'socks5://163.172.152.192:1080'}
+USERID = '772208009'
 
 
 class DatabaseManager:
@@ -14,20 +17,23 @@ class DatabaseManager:
         self.conn = psycopg2.connect(dbname='tg_db', user='postgres', password='qqq')
         self.cur = self.conn.cursor()
 
-    def insert_rss_url(self, record):
-        self.cur.execute('INSERT INTO rss_urls (url) VALUES (%s) ON CONFLICT DO NOTHING', (record,))
+    def add_rss_url(self, rss_url):
+        self.cur.execute('INSERT INTO rss_urls (rss_url) VALUES (%s) ON CONFLICT DO NOTHING', (rss_url,))
         self.conn.commit()
-        return
 
-    def insert_news(self, news_list, rss_url):
-        prepared_sql = "INSERT INTO news (url, rss_url) VALUES %s ON CONFLICT DO NOTHING RETURNING url"
-        prepared_news_list = [(x, rss_url) for x in news_list]
-        aaa = extras.execute_values(self.cur, prepared_sql, prepared_news_list, fetch=True)
+    def insert_news(self, news_list):
+        prepared_sql = 'INSERT INTO news_feed (title, news_url, publish_time, rss_url) VALUES %s ON CONFLICT DO NOTHING RETURNING title, news_url'
+        # if date < current_date:
+        inserted_records = extras.execute_values(self.cur,
+                                                 prepared_sql,
+                                                 news_list,
+                                                 template='(%(title)s, %(link)s, %(published_time)s, %(rss_id)s)',
+                                                 fetch=True)
         self.conn.commit()
-        return aaa
+        return inserted_records
 
     def load_rss_urls(self):
-        self.cur.execute('SELECT url FROM rss_urls')
+        self.cur.execute('SELECT rss_url FROM rss_urls')
         all_urls = self.cur.fetchall()
         return all_urls
 
@@ -35,103 +41,100 @@ class DatabaseManager:
 class NewsParser:
     def __init__(self):
         self.db_worker = DatabaseManager()
-        return
 
     def check_news(self):
-        logger.info("Checking news..")
+        logger.info("def check_news(): Checking news..")
         news_list = []
         checker = []
         rss_urls = self.db_worker.load_rss_urls()
         for url in rss_urls:
             feed = feedparser.parse(url[0])
+            self.db_worker.cur.execute('SELECT rss_id FROM rss_urls WHERE rss_url = (%s)', (url[0],))
+            rss_id = self.db_worker.cur.fetchone()[0]
             for post in feed.entries:
-                news_list.append(post.link)
-                # news_list.append({'title': post.link, 'link': post.link}) !!!!!!!!
-            checker = self.db_worker.insert_news(news_list, url)
-            if checker:
-                logger.info('We have news %s!', checker)
-            else:
-                logger.info('No news there..')
-        return checker
+                news_list.append({'title': post.title, 'link': post.link, 'published_time': post.published, 'rss_id': rss_id})
+            checker.append(self.db_worker.insert_news(news_list))
+            del feed
+        if checker:
+            return checker
+
 
     def get_current_news(self, rss_url):
         news_list = []
         current_feed = feedparser.parse(rss_url)
+        self.db_worker.cur.execute('SELECT rss_id FROM rss_urls WHERE rss_url = (%s)', (rss_url,))
+        rss_id = self.db_worker.cur.fetchone()[0]
         for post in current_feed.entries:
-            news_list.append(post.link)
+            news_list.append({'title': post.title, 'link': post.link, 'published_time': post.published, 'rss_id': rss_id})
         if news_list:
-            self.db_worker.insert_news(news_list, rss_url)
-        logger.info('Current news_list: "%s"', news_list)
-        return
+            self.db_worker.insert_news(news_list)
 
 
-class TelegramBot:
-    def __init__(self):
-        proxy_tg = {
-            'proxy_url': 'socks5://163.172.152.192:1080',
-        }
+def add_rss(bot, update, args):
+    if args:
+        logger.info('New RSS here! "%s"', args[0])
+        database_worker.add_rss_url(args[0])
+        newsparser_worker.get_current_news(args[0])
+    else:
+        update.message.reply_text('Usage: /add rss_url')
 
-        config = configparser.ConfigParser()
-        config.read("config.ini")
-        token = config['DEFAULT']['Token']
 
-        self.database_worker = DatabaseManager()
-        self.newsparser_worker = NewsParser()
-        self.__updater_worker = Updater(token, request_kwargs=proxy_tg)
+def parse_now(bot, update):
+    total = newsparser_worker.check_news()
+    msg = f'Total news parsed: {len(total)}'
+    print(f'bot.send_message: {msg}')
+    #bot.send_message(chat_id=USERID, text=msg, disable_notification=True)
 
-        self.__dispatcher = self.__updater_worker.dispatcher
-        self.__job_worker = self.__updater_worker.job_queue
 
-        self.__dispatcher.add_handler(CommandHandler("add", self.__add_rss, pass_args=True))
-        self.__dispatcher.add_handler(CommandHandler("parse", self.__parse_now))
-        self.__dispatcher.add_handler(CommandHandler("check", self.__check_news))
-        self.__dispatcher.add_handler(CommandHandler("startx", self.__start_job))
-        self.__dispatcher.add_handler(CommandHandler("stopx", self.__stop_job))
-        self.__dispatcher.add_error_handler(self.__error)
+def get_news(bot, update):
+    news_list = None or newsparser_worker.check_news()
+    if news_list:
+        logger.info('Trying to send: "%s" amount of news', len(news_list[0]))
+        for item in news_list[0]:
+            msg = f'{item[0]}\n{item[1]}'
+            print(f'bot.send_message: {item[0]} {item[1]}')
+            #bot.send_message(chat_id=USERID, text=item[0], disable_notification=True)
+    else:
+        logger.info('Nothing to send')
 
-        self.__updater_worker.start_polling()
-        self.__start_job()
-        self.__updater_worker.idle()
 
-    def __add_rss(self, bot, update, args):
-        if args:
-            logger.info('New RSS here! "%s"', args[0])
-            self.database_worker.insert_rss_url(args[0])
-            self.newsparser_worker.get_current_news(args[0])
-        else:
-            update.message.reply_text('Usage: /add rss_url')
-        return
+def job_handler(job_queue, user_data, start_job=None):
+    if start_job:
+        current_job = job_queue.run_repeating(get_news, interval=600, first=5)
+        user_data['job'] = current_job
+        print('job is starting')
+    else:
+        current_job = user_data['job']
+        current_job.schedule_remove()
+        del user_data['job']
+        print('job canceled')
 
-    def __parse_now(self, bot, update):
-        total = self.newsparser_worker.check_news()
-        msg = f'Total news parsed: {len(total)}'
-        print(msg)
-        bot.send_message(chat_id='772208009', text=msg, disable_notification=True)
-        return
 
-    def __check_news(self, bot, update):
-        new_news_list = self.newsparser_worker.check_news()
-        if new_news_list:
-            logger.info('Trying to send: "%s" amount of news', len(new_news_list))
-            for item in new_news_list:
-                bot.send_message(chat_id='772208009', text=item[0], disable_notification=True)
-        else:
-            logger.info('Nothing to send')
-        return
+def error(bot, update, error):
+    logger.warning('Update "%s" caused error "%s"', update, error)
 
-    def __start_job(self):
-        logger.info("Job start! Next check in 60 sec...")
-        self.checker_job = self.__job_worker.run_repeating(self.__check_news, interval=600, first=60)
-        return
 
-    def __stop_job(self, bot, update):
-        self.checker_job.enabled = False
-        return
+def main():
+    config = configparser.ConfigParser()
+    config.read("config.ini")
+    token = config['DEFAULT']['Token']
 
-    def __error(self, bot, update, error):
-        logger.warning('Update "%s" caused error "%s"', update, error)
-        return
+    updater_worker = Updater(token, request_kwargs=PROXY_TG)
+    job_worker = updater_worker.job_queue
+    dispatcher = updater_worker.dispatcher
+
+    dispatcher.add_handler(CommandHandler("add", add_rss, pass_args=True))
+    dispatcher.add_handler(CommandHandler("parse", parse_now, pass_user_data=True))
+    dispatcher.add_handler(CommandHandler("get", get_news, pass_user_data=True, pass_job_queue=True))
+    dispatcher.add_handler(CommandHandler("stopj", job_handler, pass_user_data=True, pass_job_queue=True))
+    dispatcher.add_error_handler(error)
+
+    updater_worker.start_polling()
+    job_handler(job_worker, dispatcher.user_data, start_job=True)
+    updater_worker.idle()
 
 
 if __name__ == '__main__':
-    TelegramBot()
+    database_worker = DatabaseManager()
+    newsparser_worker = NewsParser()
+    main()
